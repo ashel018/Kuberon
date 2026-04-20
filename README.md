@@ -158,12 +158,6 @@ Use `--dry-run` first if you want to preview changes.
 - Fixes are preview-first before live application
 - Verification is available after apply
 
-## Notes
-
-- The current login/account UI is frontend-level product styling, not secure backend authentication
-- Some UI controls are intentionally placeholder interactions until deeper backend support is added
-- The current app is optimized for local development and demo workflows
-
 ## Next Logical Upgrades
 
 - real authentication and user storage

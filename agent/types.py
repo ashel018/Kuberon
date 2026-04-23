@@ -74,6 +74,7 @@ class AgentState:
     namespace: str
     intent: str = ""
     memory_summary: str = ""
+    prefetched_context: str = ""
     runbook_matches: list[dict[str, Any]] = field(default_factory=list)
     tool_plan: list[PlannedToolCall] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)

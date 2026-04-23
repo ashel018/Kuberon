@@ -1,0 +1,1 @@
+{"spec":{"template":{"spec":{"containers":[{"name":"server","image":"us-central1-docker.pkg.dev/google-samples/microservices-demo/cartservice:v0.10.5","command":["/bin/sh","-c","exit 1"]}]}}}}

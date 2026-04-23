@@ -88,6 +88,37 @@ class ConversationMemory:
             return
         self._fallback[session_id].append(json.loads(payload))
 
+    @staticmethod
+    def _derive_title(message: str) -> str:
+        text = " ".join((message or "").split()).strip()
+        if not text:
+            return "Untitled chat"
+
+        lowered = text.lower()
+        prefixes = [
+            "what is ",
+            "what are ",
+            "how does ",
+            "how do i ",
+            "show me ",
+            "can you ",
+            "please ",
+            "why is ",
+            "why does ",
+            "tell me about ",
+            "explain ",
+        ]
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+
+        text = text.rstrip("?.! ")
+        words = text.split()
+        if not words:
+            return "Untitled chat"
+        return " ".join(words[:7]).strip().capitalize()
+
     async def get_turns(self, session_id: str, limit: int = 8) -> list[dict]:
         if self._redis:
             try:
@@ -129,26 +160,104 @@ class ConversationMemory:
             return await asyncio.to_thread(work)
         return self._fallback.get(session_id, [])[-limit:]
 
-    async def list_sessions(self) -> list[str]:
+    async def list_sessions(self) -> list[dict]:
         if self._redis:
             try:
                 keys = await self._redis.keys("kubeops:session:*")
-                return sorted(key.split(":")[-1] for key in keys)
+                session_ids = sorted(key.split(":")[-1] for key in keys)
+                items: list[dict] = []
+                for session_id in session_ids:
+                    turns = await self.get_turns(session_id, limit=50)
+                    title = session_id
+                    preview = "Open this conversation again."
+                    updated_at = ""
+                    if turns:
+                        title = self._derive_title(turns[0]["user_message"])
+                        preview = turns[-1]["assistant_message"][:140]
+                        updated_at = turns[-1]["created_at"]
+                    items.append(
+                        {
+                            "session_id": session_id,
+                            "title": title,
+                            "preview": preview,
+                            "updated_at": updated_at,
+                        }
+                    )
+                return items
             except Exception:
                 pass
         if self._sqlite_path:
             import sqlite3
             import asyncio
 
-            def work() -> list[str]:
+            def work() -> list[dict]:
                 with sqlite3.connect(self._sqlite_path) as connection:
+                    connection.row_factory = sqlite3.Row
                     rows = connection.execute(
-                        "SELECT DISTINCT session_id FROM chat_turns ORDER BY id DESC"
+                        """
+                        SELECT
+                            latest.session_id AS session_id,
+                            first_turn.user_message AS title,
+                            latest.assistant_message AS preview,
+                            latest.created_at AS updated_at
+                        FROM chat_turns AS latest
+                        INNER JOIN (
+                            SELECT session_id, MAX(id) AS max_id
+                            FROM chat_turns
+                            GROUP BY session_id
+                        ) AS grouped
+                            ON grouped.session_id = latest.session_id
+                           AND grouped.max_id = latest.id
+                        INNER JOIN (
+                            SELECT session_id, MIN(id) AS min_id
+                            FROM chat_turns
+                            GROUP BY session_id
+                        ) AS starters
+                            ON starters.session_id = latest.session_id
+                        INNER JOIN chat_turns AS first_turn
+                            ON first_turn.session_id = starters.session_id
+                           AND first_turn.id = starters.min_id
+                        ORDER BY latest.id DESC
+                        """
                     ).fetchall()
-                return [row[0] for row in rows]
+                return [
+                    {
+                        "session_id": row["session_id"],
+                        "title": ConversationMemory._derive_title(row["title"]),
+                        "preview": row["preview"],
+                        "updated_at": row["updated_at"],
+                    }
+                    for row in rows
+                ]
 
             return await asyncio.to_thread(work)
-        return sorted(self._fallback.keys())
+        return [
+            {
+                "session_id": session_id,
+                "title": self._derive_title(turns[0]["user_message"]) if turns else session_id,
+                "preview": turns[-1]["assistant_message"][:140] if turns else "Open this conversation again.",
+                "updated_at": turns[-1]["created_at"] if turns else "",
+            }
+            for session_id, turns in sorted(self._fallback.items())
+        ]
+
+    async def delete_session(self, session_id: str) -> None:
+        if self._redis:
+            try:
+                await self._redis.delete(f"kubeops:session:{session_id}")
+            except Exception:
+                pass
+        if self._sqlite_path:
+            import sqlite3
+            import asyncio
+
+            def work() -> None:
+                with sqlite3.connect(self._sqlite_path) as connection:
+                    connection.execute("DELETE FROM chat_turns WHERE session_id = ?", (session_id,))
+                    connection.commit()
+
+            await asyncio.to_thread(work)
+        self._fallback.pop(session_id, None)
 
     @staticmethod
     def summarize(turns: Iterable[dict]) -> str:

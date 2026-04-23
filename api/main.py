@@ -65,6 +65,17 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/")
+async def root() -> dict:
+    return {
+        "name": "Kuberon API",
+        "status": "ok",
+        "message": "Backend is running. Use /health for a health check or connect through the frontend on port 5173.",
+        "frontend": FRONTEND_URL,
+        "websocket": "/ws/chat",
+    }
+
+
 @app.get("/api/auth/google/start")
 async def google_auth_start(frontend_redirect: str = Query(default=FRONTEND_URL)):
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
@@ -228,6 +239,12 @@ async def list_sessions() -> dict:
 @app.get("/api/sessions/{session_id}/history")
 async def session_history(session_id: str) -> dict:
     return {"items": await assistant.memory.get_turns(session_id, limit=20)}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict:
+    await assistant.memory.delete_session(session_id)
+    return {"ok": True, "session_id": session_id}
 
 
 @app.get("/api/cluster/snapshot")

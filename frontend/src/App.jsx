@@ -6,21 +6,11 @@ const starterPrompts = [
   "Show memory-related issues from the last hour.",
 ];
 
-const kubeHistoryItems = [
-  "Cartservice failing health checks",
-  "Pending pods in default namespace",
-  "OOMKilled workload investigation",
-  "ImagePullBackOff recovery plan",
-  "CrashLoopBackOff diagnostics",
-  "Service endpoint mismatch issue",
-  "Node pressure and scheduling errors",
-  "High memory usage in checkoutservice",
-  "Prometheus metrics query help",
-  "Deployment rollout verification",
-];
-
-const modelOptions = ["Kuberon Base", "Kuberon Pro", "Kuberon Ops", "Kuberon Reasoner"];
 const BACKEND_BASE_URL = "http://127.0.0.1:8000";
+const sidebarNavItems = [
+  { id: "new-chat", label: "New chat", icon: "new-chat" },
+  { id: "search", label: "Search chats", icon: "search" },
+];
 
 function createSessionId() {
   return `session-${Math.random().toString(36).slice(2, 10)}`;
@@ -35,6 +25,65 @@ function formatMessageTime(value) {
     return "";
   }
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function formatSessionTitle(value) {
+  if (!value) {
+    return "Untitled chat";
+  }
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= 44) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, 41)}...`;
+}
+
+function deriveChatTitle(value) {
+  const cleaned = (value || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return "Untitled chat";
+  }
+
+  const lowered = cleaned.toLowerCase();
+  const prefixes = [
+    "what is ",
+    "what are ",
+    "how does ",
+    "how do i ",
+    "show me ",
+    "can you ",
+    "please ",
+    "why is ",
+    "why does ",
+    "tell me about ",
+    "explain ",
+  ];
+
+  let title = cleaned;
+  for (const prefix of prefixes) {
+    if (lowered.startsWith(prefix)) {
+      title = cleaned.slice(prefix.length).trim();
+      break;
+    }
+  }
+
+  title = title.replace(/[?.!]+$/g, "").trim();
+  const words = title.split(" ").filter(Boolean);
+  if (!words.length) {
+    return "Untitled chat";
+  }
+  return formatSessionTitle(`${words.slice(0, 7).join(" ").charAt(0).toUpperCase()}${words.slice(0, 7).join(" ").slice(1)}`);
+}
+
+function formatSessionPreview(value) {
+  if (!value) {
+    return "Open this conversation again.";
+  }
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= 68) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, 65)}...`;
 }
 
 function parseStructuredAssistantText(text) {
@@ -94,6 +143,178 @@ function parseStructuredAssistantText(text) {
     fix,
     nextQuestions,
   };
+}
+
+const assistantSectionLabels = new Set([
+  "Issue",
+  "Severity",
+  "Cluster evidence summary",
+  "Likely causes",
+  "Verify with",
+  "Root cause",
+  "Suggested fixes",
+  "Analysis",
+  "Debug",
+  "Fix",
+  "Summary",
+  "Observed",
+  "Follow-ups",
+  "What is it?",
+  "The simple analogy",
+  "How it works",
+  "Real example",
+  "When to use it",
+  "Common mistakes",
+  "Related topics to learn next",
+]);
+
+function stripInlineMarkdown(text) {
+  return (text || "").replace(/\*\*(.*?)\*\*/g, "$1").replace(/\*(.*?)\*/g, "$1").trim();
+}
+
+function renderInlineContent(text, keyPrefix) {
+  const normalized = stripInlineMarkdown(text);
+  return normalized.split(/(`[^`]+`)/g).filter(Boolean).map((part, index) => {
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={`${keyPrefix}-code-${index}`}>{part.slice(1, -1)}</code>;
+    }
+    return <span key={`${keyPrefix}-text-${index}`}>{part}</span>;
+  });
+}
+
+function detectAssistantHeading(line) {
+  const normalized = stripInlineMarkdown(line).replace(/:$/, "");
+  if (!normalized || normalized === "---") {
+    return null;
+  }
+  if (normalized.startsWith("📘 ")) {
+    return { type: "title", text: normalized.replace(/^📘\s*/, "") };
+  }
+  if (assistantSectionLabels.has(normalized)) {
+    return { type: "heading", text: normalized };
+  }
+  return null;
+}
+
+function parseAssistantBlocks(text) {
+  const lines = (text || "").split(/\r?\n/);
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const rawLine = lines[index] || "";
+    const trimmed = rawLine.trim();
+
+    if (!trimmed || trimmed === "---") {
+      index += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith("```")) {
+      const language = trimmed.replace(/```/, "").trim();
+      index += 1;
+      const codeLines = [];
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push({ type: "code", language, text: codeLines.join("\n") });
+      continue;
+    }
+
+    const severityMatch = stripInlineMarkdown(trimmed).match(/^Severity:\s*(.+)$/i);
+    if (severityMatch) {
+      blocks.push({ type: "meta", label: "Severity", value: severityMatch[1] });
+      index += 1;
+      continue;
+    }
+
+    const heading = detectAssistantHeading(trimmed);
+    if (heading) {
+      blocks.push(heading);
+      index += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith("- ")) {
+      const items = [];
+      while (index < lines.length && lines[index].trim().startsWith("- ")) {
+        items.push(stripInlineMarkdown(lines[index].trim().slice(2)));
+        index += 1;
+      }
+      blocks.push({ type: "list", items });
+      continue;
+    }
+
+    const paragraphLines = [stripInlineMarkdown(trimmed)];
+    index += 1;
+    while (index < lines.length) {
+      const nextTrimmed = lines[index].trim();
+      if (!nextTrimmed || nextTrimmed === "---" || nextTrimmed.startsWith("```") || nextTrimmed.startsWith("- ")) {
+        break;
+      }
+      if (stripInlineMarkdown(nextTrimmed).match(/^Severity:\s*(.+)$/i) || detectAssistantHeading(nextTrimmed)) {
+        break;
+      }
+      paragraphLines.push(stripInlineMarkdown(nextTrimmed));
+      index += 1;
+    }
+    blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
+  }
+
+  return blocks;
+}
+
+function stripForSpeech(text) {
+  return (text || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/\*/g, "")
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function renderAssistantBlocks(blocks, keyPrefix) {
+  return blocks.map((block, index) => {
+    const key = `${keyPrefix}-${block.type}-${index}`;
+
+    if (block.type === "title") {
+      return <h2 className="assistant-title" key={key}>{renderInlineContent(block.text, key)}</h2>;
+    }
+    if (block.type === "heading") {
+      return <h3 className="assistant-heading" key={key}>{renderInlineContent(block.text, key)}</h3>;
+    }
+    if (block.type === "meta") {
+      return (
+        <div className="assistant-meta" key={key}>
+          <span className="assistant-meta-label">{block.label}</span>
+          <strong className="assistant-meta-value">{block.value}</strong>
+        </div>
+      );
+    }
+    if (block.type === "list") {
+      return (
+        <ul className="assistant-list" key={key}>
+          {block.items.map((item, itemIndex) => (
+            <li key={`${key}-item-${itemIndex}`}>{renderInlineContent(item, `${key}-item-${itemIndex}`)}</li>
+          ))}
+        </ul>
+      );
+    }
+    if (block.type === "code") {
+      return (
+        <pre className="assistant-code" key={key}>
+          <code>{block.text}</code>
+        </pre>
+      );
+    }
+    return <p className="assistant-paragraph" key={key}>{renderInlineContent(block.text, key)}</p>;
+  });
 }
 
 function Icon({ name }) {
@@ -212,6 +433,15 @@ function Icon({ name }) {
     return (
       <svg {...props}>
         <path d="M7 10l5 5 5-5" />
+      </svg>
+    );
+  }
+  if (name === "menu") {
+    return (
+      <svg {...props}>
+        <path d="M4 7h16" />
+        <path d="M4 12h16" />
+        <path d="M4 17h16" />
       </svg>
     );
   }
@@ -334,6 +564,34 @@ function Icon({ name }) {
       </svg>
     );
   }
+  if (name === "speaker") {
+    return (
+      <svg {...props}>
+        <path d="M5 10v4h4l5 4V6l-5 4z" />
+        <path d="M18 9a4.5 4.5 0 0 1 0 6" />
+      </svg>
+    );
+  }
+  if (name === "speaker-stop") {
+    return (
+      <svg {...props}>
+        <path d="M5 10v4h4l5 4V6l-5 4z" />
+        <path d="M18 9l4 4" />
+        <path d="M22 9l-4 4" />
+      </svg>
+    );
+  }
+  if (name === "trash") {
+    return (
+      <svg {...props}>
+        <path d="M4 7h16" />
+        <path d="M10 11v6" />
+        <path d="M14 11v6" />
+        <path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" />
+        <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
+      </svg>
+    );
+  }
   if (name === "send") {
     return (
       <svg {...props}>
@@ -445,16 +703,32 @@ export default function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [connectionMessage, setConnectionMessage] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(() => window.innerWidth <= 920);
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedModel, setSelectedModel] = useState(modelOptions[0]);
   const [uiNotice, setUiNotice] = useState("");
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  const [isVoiceListening, setIsVoiceListening] = useState(false);
+  const [voiceModeEnabled, setVoiceModeEnabled] = useState(false);
+  const [speakingMessageId, setSpeakingMessageId] = useState("");
   const socketRef = useRef(null);
   const messageLogRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const plusMenuRef = useRef(null);
   const pendingAssistantRef = useRef({ toolResults: [], fixes: [] });
+  const recognitionRef = useRef(null);
+  const speechRef = useRef(null);
+
+  async function refreshSessions() {
+    try {
+      const response = await fetch("/api/sessions");
+      const data = await response.json();
+      setSessions(Array.isArray(data.sessions) ? data.sessions : []);
+    } catch {
+      setSessions([]);
+    }
+  }
 
   useEffect(() => {
     localStorage.setItem("kubeops-session", sessionId);
@@ -516,10 +790,39 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/sessions")
-      .then((response) => response.json())
-      .then((data) => setSessions(data.sessions || []))
-      .catch(() => setSessions([]));
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.stop();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleResize() {
+      const nextIsMobile = window.innerWidth <= 920;
+      setIsMobileViewport(nextIsMobile);
+      if (!nextIsMobile) {
+        setMobileSidebarOpen(false);
+      }
+    }
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    refreshSessions();
   }, [sessionId]);
 
   useEffect(() => {
@@ -593,6 +896,7 @@ export default function App() {
             ),
           );
           pendingAssistantRef.current = { toolResults: [], fixes: [] };
+          refreshSessions();
         }
       });
     };
@@ -658,11 +962,13 @@ export default function App() {
   }, [plusMenuOpen]);
 
   const filteredHistory = useMemo(() => {
-    const source = [...kubeHistoryItems, ...sessions.filter((item) => !kubeHistoryItems.includes(item))];
     if (!searchQuery.trim()) {
-      return source;
+      return sessions;
     }
-    return source.filter((item) => item.toLowerCase().includes(searchQuery.toLowerCase()));
+    const term = searchQuery.toLowerCase();
+    return sessions.filter((item) =>
+      [item.title, item.preview, item.session_id].some((value) => (value || "").toLowerCase().includes(term)),
+    );
   }, [searchQuery, sessions]);
 
   function sendMessage(text) {
@@ -675,10 +981,22 @@ export default function App() {
       return;
     }
     const createdAt = new Date().toISOString();
+    if (messages.length === 0) {
+      setSessions((current) => {
+        const nextItem = {
+          session_id: sessionId,
+          title: deriveChatTitle(trimmed),
+          preview: "Waiting for Kuberon to respond...",
+          updated_at: createdAt,
+        };
+        return [nextItem, ...current.filter((item) => item.session_id !== sessionId)];
+      });
+    }
     setMessages((current) => [...current, { role: "user", text: trimmed, createdAt }]);
     pendingAssistantRef.current = { toolResults: [], fixes: [] };
     socketRef.current.send(JSON.stringify({ message: trimmed, namespace }));
     setInput("");
+    setMobileSidebarOpen(false);
   }
 
   function handleComposerKeyDown(event) {
@@ -692,6 +1010,7 @@ export default function App() {
     setMessages([]);
     setSessionId(createSessionId());
     setPlusMenuOpen(false);
+    setMobileSidebarOpen(false);
   }
 
   function runPrompt(prompt) {
@@ -709,8 +1028,129 @@ export default function App() {
     setPlusMenuOpen(false);
   }
 
+  function stopVoiceRecognition() {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+    setIsVoiceListening(false);
+  }
+
+  function startVoiceRecognition({ autoSend = false } = {}) {
+    const RecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!RecognitionCtor) {
+      setUiNotice("Voice input is not supported in this browser. Try Chrome or Edge.");
+      return;
+    }
+
+    if (isVoiceListening) {
+      if (voiceModeEnabled !== autoSend) {
+        stopVoiceRecognition();
+      } else {
+        stopVoiceRecognition();
+        setVoiceModeEnabled(false);
+        setUiNotice(autoSend ? "Voice mode stopped." : "Voice dictation stopped.");
+        return;
+      }
+    }
+
+    const recognition = new RecognitionCtor();
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = false;
+    recognitionRef.current = recognition;
+
+    let finalTranscript = "";
+
+    recognition.onresult = (event) => {
+      let interimTranscript = "";
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result[0]?.transcript || "";
+        if (result.isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      const nextText = `${finalTranscript} ${interimTranscript}`.trim();
+      setInput(nextText);
+    };
+
+    recognition.onerror = (event) => {
+      setIsVoiceListening(false);
+      setVoiceModeEnabled(false);
+      if (event.error === "not-allowed") {
+        setUiNotice("Microphone permission was denied. Allow microphone access and try again.");
+        return;
+      }
+      if (event.error === "no-speech") {
+        setUiNotice("No speech detected. Try again and speak a little closer to the mic.");
+        return;
+      }
+      setUiNotice(`Voice input error: ${event.error}.`);
+    };
+
+    recognition.onend = () => {
+      setIsVoiceListening(false);
+      const spokenText = finalTranscript.trim() || textareaRef.current?.value.trim() || "";
+      if (autoSend && spokenText) {
+        sendMessage(spokenText);
+      } else if (spokenText) {
+        setInput(spokenText);
+      }
+      setVoiceModeEnabled(false);
+    };
+
+    setUiNotice(autoSend ? "Listening in voice mode..." : "Listening... Speak now.");
+    setVoiceModeEnabled(autoSend);
+    setIsVoiceListening(true);
+    recognition.start();
+  }
+
   function handleHistoryClick(item) {
-    sendMessage(item);
+    setMobileSidebarOpen(false);
+    setMessages([]);
+    setSessionId(item.session_id);
+    setPlusMenuOpen(false);
+  }
+
+  function handleSidebarNav(actionId) {
+    if (actionId === "new-chat") {
+      resetConversation();
+      return;
+    }
+    if (actionId === "search") {
+      setUiNotice("Use the search box to filter your saved chats.");
+      return;
+    }
+  }
+
+  async function handleDeleteSession(event, item) {
+    event.stopPropagation();
+    try {
+      const response = await fetch(`/api/sessions/${item.session_id}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error("Could not delete the chat.");
+      }
+      setSessions((current) => current.filter((entry) => entry.session_id !== item.session_id));
+      if (item.session_id === sessionId) {
+        setMessages([]);
+        setSessionId(createSessionId());
+      }
+      setUiNotice("Chat deleted.");
+    } catch (error) {
+      setUiNotice(error.message || "Could not delete the chat.");
+    }
+  }
+
+  function toggleSidebar() {
+    if (isMobileViewport) {
+      setMobileSidebarOpen((current) => !current);
+      return;
+    }
+    setSidebarCollapsed((current) => !current);
   }
 
   function toggleTheme() {
@@ -781,6 +1221,8 @@ export default function App() {
   }
 
   function renderComposer(extraClass = "") {
+    const showShortcuts = messages.length === 0;
+
     return (
       <div className={`composer-shell ${extraClass}`.trim()}>
         {connectionMessage || uiNotice ? <div className="composer-note">{connectionMessage || uiNotice}</div> : null}
@@ -820,11 +1262,6 @@ export default function App() {
                     <span>More</span>
                     <span className="plus-menu-arrow"><Icon name="chevron-right" /></span>
                   </button>
-                  <button type="button" className="plus-menu-item plus-menu-divider has-arrow" onClick={() => handleUiAction("Projects")}>
-                    <span className="plus-menu-icon"><Icon name="folder" /></span>
-                    <span>Projects</span>
-                    <span className="plus-menu-arrow"><Icon name="chevron-right" /></span>
-                  </button>
                 </div>
               ) : null}
             </div>
@@ -836,10 +1273,20 @@ export default function App() {
               placeholder="Ask anything"
             />
             <div className="composer-right">
-              <button type="button" className="composer-icon" aria-label="Voice" onClick={() => handleUiAction("Voice note")}>
+              <button
+                type="button"
+                className={`composer-icon ${isVoiceListening && !voiceModeEnabled ? "active" : ""}`}
+                aria-label="Voice"
+                onClick={() => startVoiceRecognition({ autoSend: false })}
+              >
                 <Icon name="mic" />
               </button>
-              <button type="button" className="composer-icon" aria-label="Voice mode" onClick={() => handleUiAction("Voice mode")}>
+              <button
+                type="button"
+                className={`composer-icon ${isVoiceListening && voiceModeEnabled ? "active" : ""}`}
+                aria-label="Voice mode"
+                onClick={() => startVoiceRecognition({ autoSend: true })}
+              >
                 <Icon name="wave" />
               </button>
               <button type="button" className="composer-send" disabled={!isConnected} aria-label="Send" onClick={() => sendMessage(input)}>
@@ -852,94 +1299,116 @@ export default function App() {
           </div>
         </div>
 
-        <div className="shortcut-row">
-          {starterPrompts.map((chip) => (
-            <button key={chip} type="button" className="shortcut-chip" onClick={() => runPrompt(chip)}>
-              {chip}
-            </button>
-          ))}
-        </div>
+        {showShortcuts ? (
+          <div className="shortcut-row">
+            {starterPrompts.map((chip) => (
+              <button key={chip} type="button" className="shortcut-chip" onClick={() => runPrompt(chip)}>
+                {chip}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
     );
   }
 
-  function renderAssistantMessage(message) {
-    const parsed = parseStructuredAssistantText(message.text);
-    if (!parsed) {
-      return <pre>{message.text}</pre>;
+  function toggleSpeakMessage(messageId, text) {
+    if (!window.speechSynthesis) {
+      setUiNotice("Read aloud is not supported in this browser.");
+      return;
     }
 
-    const severityTone = parsed.severity.toLowerCase();
+    if (speakingMessageId === messageId) {
+      window.speechSynthesis.cancel();
+      speechRef.current = null;
+      setSpeakingMessageId("");
+      return;
+    }
+
+    const content = stripForSpeech(text);
+    if (!content) {
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(content);
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.onend = () => {
+      speechRef.current = null;
+      setSpeakingMessageId("");
+    };
+    utterance.onerror = () => {
+      speechRef.current = null;
+      setSpeakingMessageId("");
+      setUiNotice("Could not read this message aloud.");
+    };
+    speechRef.current = utterance;
+    setSpeakingMessageId(messageId);
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function renderAssistantMessage(message) {
+    const messageId = `${message.createdAt || "assistant"}-${message.text.slice(0, 24)}`;
+    const blocks = parseAssistantBlocks(message.text);
+    const followUps = [];
+    let insideFollowUps = false;
+
+    for (const block of blocks) {
+      if (block.type === "heading") {
+        insideFollowUps = block.text === "Follow-ups";
+        continue;
+      }
+      if (insideFollowUps && block.type === "list") {
+        followUps.push(...block.items);
+      }
+    }
+
+    const visibleBlocks = blocks.filter((block, index) => {
+      if (block.type === "heading" && block.text === "Follow-ups") {
+        return false;
+      }
+      const previous = blocks[index - 1];
+      if (followUps.length && block.type === "list" && previous?.type === "heading" && previous.text === "Follow-ups") {
+        return false;
+      }
+      return true;
+    });
+
     return (
-      <div className="incident-card">
-        {message.toolResults?.length ? (
-          <div className="incident-tools">
-            <div className="incident-tools-header">
-              <span>Running diagnostic tools</span>
-              <strong>{message.toolResults.length} / {message.toolResults.length}</strong>
-            </div>
-            <div className="incident-tool-list">
-              {message.toolResults.map((tool, index) => (
-                <details className="incident-tool-item" key={`${tool.name}-${index}`}>
-                  <summary>
-                    <span className={`tool-status ${tool.ok ? "ok" : "error"}`} />
-                    <span className="tool-name">{tool.name}</span>
-                    <span className="tool-command">{tool.command}</span>
-                  </summary>
-                  <pre>{tool.output || "No output"}</pre>
-                </details>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        <section className={`incident-section severity ${severityTone}`}>
-          <div className="incident-section-head">
-            <span>Severity</span>
-            <strong>{parsed.severity}</strong>
-          </div>
-        </section>
-
-        {parsed.findings.length ? (
-          <section className="incident-section">
-            <div className="incident-section-head">
-              <span>Findings</span>
-            </div>
-            <ul className="incident-list">
-              {parsed.findings.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-
-        {parsed.rootCause ? (
-          <section className="incident-section">
-            <div className="incident-section-head">
-              <span>Root cause</span>
-            </div>
-            <p>{parsed.rootCause}</p>
-          </section>
-        ) : null}
-
-        {parsed.fix ? (
-          <section className="incident-section">
-            <div className="incident-section-head">
-              <span>Fix</span>
-            </div>
-            <pre className="incident-fix">{parsed.fix}</pre>
-          </section>
-        ) : null}
-
-        {parsed.nextQuestions.length ? (
-          <div className="incident-actions">
-            {parsed.nextQuestions.map((item) => (
-              <button key={item} type="button" className="incident-action" onClick={() => runPrompt(item)}>
+      <div className="assistant-response">
+        <div className="assistant-response-body">
+          {visibleBlocks.length ? renderAssistantBlocks(visibleBlocks, messageId) : <p className="assistant-paragraph">{message.text}</p>}
+        </div>
+        <div className="assistant-actions">
+          <button
+            type="button"
+            className={`assistant-action-button ${speakingMessageId === messageId ? "active" : ""}`}
+            onClick={() => toggleSpeakMessage(messageId, message.text)}
+            aria-label={speakingMessageId === messageId ? "Stop reading aloud" : "Read aloud"}
+            title={speakingMessageId === messageId ? "Stop reading aloud" : "Read aloud"}
+          >
+            <Icon name={speakingMessageId === messageId ? "speaker-stop" : "speaker"} />
+            <span>{speakingMessageId === messageId ? "Stop" : "Listen"}</span>
+          </button>
+        </div>
+        {followUps.length ? (
+          <div className="assistant-followups">
+            {followUps.map((item) => (
+              <button key={item} type="button" className="assistant-followup-button" onClick={() => runPrompt(item)}>
                 {item}
               </button>
             ))}
           </div>
         ) : null}
+      </div>
+    );
+  }
+
+  function renderUserMessage(message) {
+    return (
+      <div className="user-bubble">
+        <p>{message.text}</p>
       </div>
     );
   }
@@ -1088,54 +1557,79 @@ export default function App() {
 
   return (
     <div className="showcase-shell">
-      <div className={`chat-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+      <div className={`chat-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}>
+        {mobileSidebarOpen ? (
+          <button type="button" className="sidebar-overlay" aria-label="Close sidebar" onClick={() => setMobileSidebarOpen(false)} />
+        ) : null}
         <aside className="chat-sidebar">
           <div className="sidebar-header">
             <button className="icon-button brand-button" type="button" aria-label="Kuberon">
               <Icon name="logo" />
             </button>
-            {!sidebarCollapsed ? (
-              <span className="brand-name">
-                <span className="brand-name-light">kube</span>
-                <span className="brand-name-accent">ron</span>
-              </span>
-            ) : null}
             <button
               className="icon-button collapse-button"
               type="button"
               aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-              onClick={() => setSidebarCollapsed((current) => !current)}
+              onClick={toggleSidebar}
             >
-              <Icon name="panel" />
+              <Icon name={isMobileViewport ? "menu" : "panel"} />
             </button>
           </div>
 
-          <button className="sidebar-primary" type="button" onClick={resetConversation}>
-            <span className="sidebar-icon"><Icon name="new-chat" /></span>
-            {!sidebarCollapsed ? <span>New chat</span> : null}
-          </button>
+          <div className="sidebar-primary-stack">
+            {sidebarNavItems.map((item) => (
+              <button
+                key={item.id}
+                className={`sidebar-primary ${item.id === "new-chat" ? "emphasis" : ""}`}
+                type="button"
+                onClick={() => handleSidebarNav(item.id)}
+              >
+                <span className="sidebar-icon"><Icon name={item.icon} /></span>
+                {!sidebarCollapsed ? <span>{item.label}</span> : null}
+              </button>
+            ))}
+          </div>
 
-          <div className="sidebar-search">
-            <span className="sidebar-icon"><Icon name="search" /></span>
-            {!sidebarCollapsed ? (
+          {!sidebarCollapsed ? (
+            <label className="sidebar-search" aria-label="Search chats">
+              <span className="sidebar-icon"><Icon name="search" /></span>
               <input
+                type="text"
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
                 placeholder="Search chats"
               />
-            ) : null}
-          </div>
+            </label>
+          ) : null}
 
-          <div className="history-wrap">
-            {!sidebarCollapsed ? <p className="sidebar-section-title">Recents</p> : null}
-            <div className="history-list">
-              {filteredHistory.map((item) => (
-                <button key={item} className="history-item" type="button" onClick={() => handleHistoryClick(item)}>
-                  {!sidebarCollapsed ? item : <span className="history-dot" />}
-                </button>
-              ))}
+          {!sidebarCollapsed ? (
+            <div className="history-wrap">
+              <p className="sidebar-section-title">Recents</p>
+              <div className="history-list">
+                {filteredHistory.map((item) => (
+                  <div key={item.session_id} className={`history-item ${item.session_id === sessionId ? "active" : ""}`}>
+                    <button className="history-open" type="button" onClick={() => handleHistoryClick(item)}>
+                      <span className="history-copy">
+                        <strong>{formatSessionTitle(item.title)}</strong>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="history-delete"
+                      aria-label={`Delete ${formatSessionTitle(item.title)}`}
+                      title="Delete chat"
+                      onClick={(event) => handleDeleteSession(event, item)}
+                    >
+                      <Icon name="trash" />
+                    </button>
+                  </div>
+                ))}
+                {!filteredHistory.length ? (
+                  <div className="history-empty">Start a new chat and it will appear here.</div>
+                ) : null}
+              </div>
             </div>
-          </div>
+          ) : null}
 
           <div className="sidebar-footer">
             <button className="account-button" type="button" onClick={handleLogout}>
@@ -1143,7 +1637,12 @@ export default function App() {
               {!sidebarCollapsed ? (
                 <span className="account-meta">
                   <strong>{profile.name}</strong>
-                  <small>{profile.email || "Sign out"}</small>
+                  <small>{profile.email || "john@example.com"}</small>
+                </span>
+              ) : null}
+              {!sidebarCollapsed ? (
+                <span className="account-settings">
+                  <Icon name="sliders" />
                 </span>
               ) : null}
             </button>
@@ -1153,16 +1652,20 @@ export default function App() {
         <main className={`chat-stage ${messages.length === 0 ? "home-mode" : ""}`}>
           <header className="chat-topbar">
             <div className="topbar-left">
-              <label className="model-selector-wrap">
-                <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} className="model-selector">
-                  {modelOptions.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-                <span className="model-caret"><Icon name="caret" /></span>
-              </label>
+              <button
+                className="icon-button mobile-sidebar-toggle"
+                type="button"
+                aria-label="Toggle sidebar"
+                onClick={toggleSidebar}
+              >
+                <Icon name="menu" />
+              </button>
+              <span className="chat-title-icon chat-title-logo">
+                <Icon name="logo" />
+              </span>
+              <div className="chat-title-copy">
+                <strong>Kuberon</strong>
+              </div>
             </div>
             <div className="topbar-right">
               <button
@@ -1173,18 +1676,6 @@ export default function App() {
                 title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
               >
                 <Icon name={theme === "dark" ? "theme-light" : "theme-dark"} />
-              </button>
-              <button className="icon-button" type="button" aria-label="Start group chat" onClick={() => handleUiAction("Start group chat")}>
-                <Icon name="group" />
-                <span className="topbar-tooltip">Start a group chat</span>
-              </button>
-              <button className="icon-button" type="button" aria-label="Account" onClick={() => handleUiAction("Account")}>
-                <Icon name="account" />
-                <span className="topbar-tooltip">Account</span>
-              </button>
-              <button className="icon-button" type="button" aria-label="More" onClick={() => handleUiAction("More")}>
-                <Icon name="more" />
-                <span className="topbar-tooltip">More</span>
               </button>
             </div>
           </header>
@@ -1202,11 +1693,8 @@ export default function App() {
               <div className="messages-stack">
                 {messages.map((message, index) => (
                   <article className={`message-row ${message.role}`} key={`${message.role}-${index}`}>
-                    <div className="message-avatar">{message.role === "user" ? "Y" : "K"}</div>
                     <div className="message-content">
-                      <span className="message-name">{message.role === "user" ? "You" : "Kuberon"}</span>
-                      {message.role === "user" && message.createdAt ? <span className="message-time">{formatMessageTime(message.createdAt)}</span> : null}
-                      {message.role === "assistant" ? renderAssistantMessage(message) : <pre>{message.text}</pre>}
+                      {message.role === "assistant" ? renderAssistantMessage(message) : renderUserMessage(message)}
                     </div>
                   </article>
                 ))}
